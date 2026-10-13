@@ -1118,3 +1118,23 @@ async def test_video_from_local_images_attaches_them_and_names_their_role(
     assert log["submitted"].endswith(clause)
     assert log["submits"] == 1
     assert result.status.media_id == "00000000-0000-4000-8000-000000000100"
+
+
+# --- sessions --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_new_session_clicks_the_agent_panels_new_session_button(page: Page) -> None:
+    await page.set_content(
+        "<script>window.clicks = 0</script>"
+        "<flow-agent-panel><button onclick='window.clicks++'><mat-icon>edit_square</mat-icon>"
+        "</button></flow-agent-panel><div class='ProseMirror' contenteditable>x</div>"
+    )
+    await aoc.AgentOnlyComposer().new_session(page)
+    assert await page.evaluate("window.clicks") == 1
+
+
+@pytest.mark.asyncio
+async def test_new_session_is_a_no_op_without_the_button(page: Page) -> None:
+    await page.set_content("<div class='ProseMirror' contenteditable>x</div>")
+    await aoc.AgentOnlyComposer().new_session(page)

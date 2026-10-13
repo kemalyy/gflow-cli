@@ -112,6 +112,10 @@ LAST_REPLY = "flow-chat-bubble"
 # --- local images: the prompt box's add menu (measured 2026-10-13) ---------------------
 #: The `add` button INSIDE the agent prompt box (the page's toolbar `+` is a different one).
 BOX_ADD = "flow-creative-agent-prompt-box button.add-menu-trigger"
+#: The agent panel's "start a new session" button. The chat keeps context across runs, and
+#: measured 2026-10-13 the agent re-tried an EARLIER failed request instead of the new one,
+#: whose failure card then failed this run; every run therefore starts a fresh session.
+NEW_SESSION = "flow-agent-panel button:has(mat-icon:text-is('edit_square'))"
 ADD_POPOVER = "flow-add-menu-popover-content"
 #: The popover's side-nav upload button (ligature `upload`); it opens a file chooser.
 POPOVER_UPLOAD = f"{ADD_POPOVER} button.sidebar-upload-btn"
@@ -513,6 +517,16 @@ class AgentOnlyComposer:
         log.info("migrated.agent_only.defaults_restored", section=snapshot.section)
 
     # --- local images --------------------------------------------------------------------
+
+    async def new_session(self, page: Page) -> None:
+        """Start a fresh agent session so no earlier request is still in the agent's context."""
+        button = page.locator(NEW_SESSION).first
+        if not await button.count():
+            log.warning("migrated.agent_only.no_new_session_button")
+            return
+        await button.click(timeout=5000)
+        await page.locator(EDITOR).last.wait_for(state="visible", timeout=10_000)
+        log.info("migrated.agent_only.new_session")
 
     async def chip_uuids(self, page: Page) -> list[str]:
         """The uuid of every attached image, in chip-bar order ('' for an unreadable chip)."""
@@ -984,6 +998,7 @@ async def run_agent_images(
     )
     try:
         # After the pane is saved and closed: the pane replaces the prompt box while open.
+        await composer.new_session(page)
         attached = await composer.attach_images(page, project_id, tuple(request.ref_paths))
         media = await composer.generate(
             page,
@@ -1048,6 +1063,7 @@ async def run_agent_video(
 
     paths, attached_as = _video_images(request)
     try:
+        await composer.new_session(page)
         attached = await composer.attach_images(page, project_id, paths)
         (media,) = await composer.generate(
             page,
