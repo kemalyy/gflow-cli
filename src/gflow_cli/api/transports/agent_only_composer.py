@@ -1,4 +1,5 @@
-"""Driver for #799's agent-only composer on flow.google.com: text-to-image and text-to-video.
+"""Driver for #799's agent-only composer on flow.google.com: images and videos, from text or
+from local image files (image-to-image, image-to-video, reference-to-video).
 
 Some accounts are served a composer with no classic arm — the only prompt box is a chat
 agent. Evidence for every anchor below:
@@ -11,12 +12,18 @@ Shape of a run:
    set -> Save -> restore -> Save round trip returns the account to its originals). The
    "Confirm before generating" radio follows ``GFLOW_CLI_AGENT_CONFIRM`` and is NOT
    restored — it is the user's standing choice.
-2. A natural-language **directive** goes into the ProseMirror editor and is submitted.
-3. At most **one credit gate** that appeared after our own submit is approved. Gates from
+2. Local images are **attached as ingredient chips** through the prompt box's own add menu
+   (upload, pick the upload, "Add to prompt"), each proven by the uuid in its chip's
+   thumbnail — measured in
+   ``docs/superpowers/spikes/2026-10-13-agent-only-attach-local-images.md``. Chips carry no
+   role, so a start / end frame is named in the directive, by attach order.
+3. A natural-language **directive** goes into the ProseMirror editor and is submitted —
+   only once the chip bar holds exactly the attached uuids, in order.
+4. At most **one credit gate** that appeared after our own submit is approved. Gates from
    earlier sessions survive reloads, so a gate present before submit is never ours; a
    second gate means the agent asked for more than one generation, and the run stops
    without approving it.
-4. Completion is observed in the **DOM**, not on the wire: this composer never fires the
+5. Completion is observed in the **DOM**, not on the wire: this composer never fires the
    classic ``ogiZ0b`` image reply, and ``as29s`` records name uuids absent from the page.
    An image is a grid tile whose media id (``img[data-media-id]``; the src is an opaque
    ``flow.google.com/asb/...`` 512-px preview, fetched at original size via ``=s0``) was not
@@ -48,6 +55,7 @@ from gflow_cli.api.transports.migrated_composer import (
     IMAGE_ASPECT_LIGATURE,
     IMAGE_MODEL_MENU_MATCHERS,
     VIDEO_MODEL_MENU_MATCHERS,
+    MigratedComposer,
     ModelMenuMatcher,
     _raise_if_out_of_credits,  # pyright: ignore[reportPrivateUsage]
 )
@@ -56,6 +64,7 @@ from gflow_cli.errors import (
     ConfigurationError,
     FlowAgentUiError,
     FlowHostMigratedError,
+    ReferenceNotFoundError,
     TransportTimeoutError,
     UiSelectorDriftError,
     WireFormatError,
@@ -96,6 +105,28 @@ LIVE_GATE = "flow-permission-message:has(div[role='radio'].option-row:not(.read-
 #: Approve is the first `check` row; the second `check` is "Always approve".
 APPROVE_ROW = "div[role='radio'].option-row:not(.read-only):has(mat-icon:text-is('check'))"
 LAST_REPLY = "flow-chat-bubble"
+
+# --- local images: the prompt box's add menu (measured 2026-10-13) ---------------------
+#: The `add` button INSIDE the agent prompt box (the page's toolbar `+` is a different one).
+BOX_ADD = "flow-creative-agent-prompt-box button.add-menu-trigger"
+ADD_POPOVER = "flow-add-menu-popover-content"
+#: The popover's side-nav upload button (ligature `upload`); it opens a file chooser.
+POPOVER_UPLOAD = f"{ADD_POPOVER} button.sidebar-upload-btn"
+POPOVER_OPTION = f"{ADD_POPOVER} button.asset-item[role='option']"
+#: "Add to prompt". Clicking an option only SELECTS it here (measured); this commits it.
+POPOVER_CONFIRM = f"{ADD_POPOVER} button.detail-add-to-prompt-btn"
+#: One attached image. Its `img.chip-image` src is `flow-content.google/image/<uuid>`, the
+#: same uuid the upload's `maseQ` reply named. NEVER click a chip: its hover overlay is a
+#: `cancel` icon, and a click removed the chip (measured).
+CHIP_IMAGE = "flow-creative-agent-prompt-box flow-ingredient-bar button.chip-container img"
+#: How long a just-uploaded option gets to be listed in the open popover.
+OPTION_S = 20.0
+#: How long the chip bar gets to show the committed image.
+CHIP_S = 10.0
+#: Measured: an option click only selects; give a cohort that commits on click time to
+#: close the popover before the confirm is looked for (as the classic Frames picker does).
+COMMIT_GRACE_S = 1.5
+ATTACH_ATTEMPTS = 3
 
 #: Toggle groups in DOM order (measured): image aspect, image count, video aspect, video count.
 _GROUP_BASE: dict[Section, int] = {"image": 0, "video": 2}
@@ -191,14 +222,45 @@ class DefaultsSnapshot:
     model_text: str
 
 
-def compose_image_directive(prompt: str, count: int, aspect_label: str) -> str:
+#: How the directive names the attached chips. Chips carry no role in the DOM (measured),
+#: so a frame's role is said in words, by attach order.
+Attached = Literal["references", "start_frame", "start_end_frames"]
+
+
+def _attachment_clause(attached: Attached | None, count: int) -> str:
+    if attached is None or count == 0:
+        return ""
+    if attached == "start_frame":
+        return ", using the attached image as its first frame"
+    if attached == "start_end_frames":
+        return (
+            ", using the first attached image as its first frame and the second attached "
+            "image as its last frame"
+        )
+    if count == 1:
+        return ", using the attached image as a reference"
+    return f", using the {count} attached images as references"
+
+
+def compose_image_directive(
+    prompt: str, count: int, aspect_label: str, *, references: int = 0
+) -> str:
     subject = "a picture" if count == 1 else f"{count} pictures"
-    return f"Make me {subject} of {prompt} in a {aspect_label} aspect ratio."
+    clause = _attachment_clause("references", references)
+    return f"Make me {subject} of {prompt} in a {aspect_label} aspect ratio{clause}."
 
 
-def compose_video_directive(prompt: str, duration: int | None, aspect_label: str) -> str:
+def compose_video_directive(
+    prompt: str,
+    duration: int | None,
+    aspect_label: str,
+    *,
+    attached: Attached | None = None,
+    images: int = 0,
+) -> str:
     length = f"{duration} second " if duration else ""
-    return f"Make me a {length}video of {prompt} in a {aspect_label} aspect ratio."
+    clause = _attachment_clause(attached, images)
+    return f"Make me a {length}video of {prompt} in a {aspect_label} aspect ratio{clause}."
 
 
 #: Measured 2026-10-04: image tiles now load from an opaque `flow.google.com/asb/...` URL and
@@ -447,6 +509,78 @@ class AgentOnlyComposer:
             raise
         log.info("migrated.agent_only.defaults_restored", section=snapshot.section)
 
+    # --- local images --------------------------------------------------------------------
+
+    async def chip_uuids(self, page: Page) -> list[str]:
+        """The uuid of every attached image, in chip-bar order ('' for an unreadable chip)."""
+        srcs = await page.evaluate(
+            "(sel) => [...document.querySelectorAll(sel)].map(i => i.currentSrc || i.src || '')",
+            CHIP_IMAGE,
+        )
+        return [_cdn_uuid(str(src), "image") or "" for src in srcs]
+
+    async def attach_images(
+        self, page: Page, project_id: str, paths: tuple[Path, ...]
+    ) -> tuple[str, ...]:
+        """Upload each file through the prompt box's add menu and attach it as a chip.
+
+        Returns the media ids in attach order — the order the chips show, and the order
+        the directive names frames by. Uploads are permanent in the project library.
+        """
+        from gflow_cli.api.client import validate_image_file  # noqa: PLC0415 - cycle
+
+        for path in paths:
+            await validate_image_file(path)
+        if await self.chip_uuids(page):
+            # A chip left from an earlier turn would ride along as an extra reference.
+            raise FlowAgentUiError(
+                detail=(
+                    "agent-only composer: the prompt box already holds attached images, so "
+                    "the request's own could not be told apart; nothing was uploaded"
+                ),
+                remediation_hint="Clear the prompt box in the Flow project, then re-run.",
+            )
+        uploader = MigratedComposer()
+        attached: list[str] = []
+        for path in paths:
+            # Same opener as a person uses, so the upload lands in the open popover.
+            media_id, display_name = await uploader._upload_via_toolbar(  # pyright: ignore[reportPrivateUsage]
+                page, project_id, path, add_button=BOX_ADD, upload_item=POPOVER_UPLOAD
+            )
+            attached.append(media_id.lower())
+            await self._add_to_prompt(page, display_name, tuple(attached))
+        log.info("migrated.agent_only.images_attached", count=len(attached), media_ids=attached)
+        return tuple(attached)
+
+    async def _add_to_prompt(self, page: Page, display_name: str, want: tuple[str, ...]) -> None:
+        """Select the upload by its run-unique name, commit it, and prove the chip is it."""
+        for attempt in range(1, ATTACH_ATTEMPTS + 1):
+            if not await page.locator(ADD_POPOVER).count():
+                await page.locator(BOX_ADD).last.click(timeout=5000)
+            option = page.locator(POPOVER_OPTION).filter(has_text=display_name).first
+            try:
+                await option.wait_for(state="visible", timeout=int(OPTION_S * 1000))
+                await option.click(timeout=5000)
+            except Exception:  # noqa: BLE001 - a miss is retried, then reported below
+                log.info("migrated.agent_only.option_missing", attempt=attempt)
+                continue
+            await asyncio.sleep(COMMIT_GRACE_S)
+            confirm = page.locator(POPOVER_CONFIRM).first
+            if await confirm.count() and await confirm.is_visible():
+                await confirm.click(timeout=5000)
+            deadline = time.monotonic() + CHIP_S
+            while time.monotonic() < deadline:
+                if tuple(await self.chip_uuids(page)) == want:
+                    return
+                await asyncio.sleep(POLL_S)
+            log.info("migrated.agent_only.chip_missing", attempt=attempt)
+        raise ReferenceNotFoundError(
+            detail=(
+                f"agent-only composer: uploaded image {want[-1]} did not attach to the prompt "
+                f"(chips: {await self.chip_uuids(page)}); nothing was submitted"
+            ),
+        )
+
     # --- generation ----------------------------------------------------------------------
 
     async def _media(self, page: Page) -> dict[str, TileMedia]:
@@ -513,8 +647,14 @@ class AgentOnlyComposer:
         count: int,
         budget_s: float,
         on_first_media: Callable[[str], object] | None = None,
+        attached: tuple[str, ...] = (),
     ) -> list[TileMedia]:
-        """Submit ``directive`` and return the ``count`` new results it produced."""
+        """Submit ``directive`` and return the ``count`` new results it produced.
+
+        ``attached`` are the image chips this run put on the prompt: the chip bar must hold
+        exactly them at submit, and their own tiles (an upload joins the grid too) are never
+        a result.
+        """
         baseline_gates = await page.locator(LIVE_GATE).count()
         baseline_head: str | None = None
         if kind == "video":
@@ -529,10 +669,10 @@ class AgentOnlyComposer:
                     ),
                     remediation_hint="Wait for the pending clip in the Flow project, then re-run.",
                 )
-            baseline = set(_video_uuids(state0))
+            baseline = set(_video_uuids(state0)) | set(attached)
             baseline_head = _tile_key(state0["finished"][0]) if state0["finished"] else None
         else:
-            baseline = await self._any_uuids(page)
+            baseline = await self._any_uuids(page) | set(attached)
 
         editor = page.locator(EDITOR).last
         if not await editor.count():
@@ -541,6 +681,16 @@ class AgentOnlyComposer:
         await page.keyboard.press("ControlOrMeta+a")
         await page.keyboard.press("Delete")
         await page.keyboard.insert_text(directive)
+        chips = tuple(await self.chip_uuids(page))
+        if chips != attached:
+            # Last check before credits: a missing, extra or reordered chip would generate
+            # from the wrong images (or none) with no error.
+            raise ReferenceNotFoundError(
+                detail=(
+                    f"agent-only composer: {len(attached)} image(s) attached but the prompt "
+                    f"holds {list(chips)} at submit; nothing was submitted"
+                ),
+            )
         submit = page.locator(SUBMIT).last
         if not await submit.count():
             await _raise_if_out_of_credits(page)
@@ -647,8 +797,10 @@ class AgentOnlyComposer:
 
 
 def _unported_image(request: GenerateImageRequest) -> str | None:
-    if request.refs or request.ref_paths:
-        return "image-to-image"
+    if request.refs:
+        # Local files are attached; an image already in the project would need the add
+        # menu's library search, which is not driven here yet.
+        return "a reference to an image already in the project"
     if request.reference_entities:
         return "character references"
     if request.instructions:
@@ -661,8 +813,20 @@ def _unported_image(request: GenerateImageRequest) -> str | None:
 
 
 def _unported_video(request: GenerateVideoRequest) -> str | None:
-    if request.mode is not Mode.T2V:
-        return f"{request.mode.value}"
+    if (
+        request.start_image_ref_name
+        or request.start_image_ref_id
+        or request.end_image_ref_name
+        or request.end_image_ref_id
+        or request.ref_names
+    ):
+        return "a frame or reference given by Flow name or media UUID"
+    if request.reference_audio:
+        return "a voice reference"
+    if request.mode is Mode.I2V and request.start_image is None:
+        return "i2v without a local start frame"
+    if request.mode is Mode.R2V and not request.reference_images:
+        return "r2v without local reference files"
     if request.reference_entities:
         return "character references"
     if request.count != 1:
@@ -676,11 +840,24 @@ def _unported_video(request: GenerateVideoRequest) -> str | None:
     return None
 
 
+def _video_images(request: GenerateVideoRequest) -> tuple[tuple[Path, ...], Attached | None]:
+    """The local files a video request attaches, in chip order, and what the directive
+    calls them. Called after :func:`_unported_video`, so i2v has its start frame."""
+    if request.mode is Mode.I2V and request.start_image is not None:
+        if request.end_image is not None:
+            return (request.start_image, request.end_image), "start_end_frames"
+        return (request.start_image,), "start_frame"
+    if request.mode is Mode.R2V:
+        return tuple(request.reference_images), "references"
+    return (), None
+
+
 def _refuse(what: str) -> FlowHostMigratedError:
     return FlowHostMigratedError(
         detail=(
-            "this account is served Flow's agent-only composer, where gflow drives text-to-image "
-            f"and text-to-video; {what} is not ported to it yet (#799)"
+            "this account is served Flow's agent-only composer, where gflow drives text-to-image, "
+            "text-to-video, and image-to-image / image-to-video / reference-to-video from local "
+            f"files; {what} is not ported to it yet (#799)"
         )
     )
 
@@ -765,7 +942,8 @@ async def run_agent_images(
     *,
     project_id: str,
 ) -> list[GeneratedImage]:
-    """Text-to-image on the agent-only composer. Same return shape as the classic path."""
+    """Text-to-image, or image-to-image from local ``ref_paths``, on the agent-only composer.
+    Same return shape as the classic path."""
     unported = _unported_image(request)
     if unported is not None:
         raise _refuse(unported)
@@ -779,14 +957,20 @@ async def run_agent_images(
         confirm=_confirm_setting(),
     )
     try:
+        # After the pane is saved and closed: the pane replaces the prompt box while open.
+        attached = await composer.attach_images(page, project_id, tuple(request.ref_paths))
         media = await composer.generate(
             page,
             compose_image_directive(
-                request.prompt, request.count, _IMAGE_ASPECT_LABEL[request.aspect]
+                request.prompt,
+                request.count,
+                _IMAGE_ASPECT_LABEL[request.aspect],
+                references=len(attached),
             ),
             kind="image",
             count=request.count,
             budget_s=IMAGE_BUDGET_S,
+            attached=attached,
         )
     finally:
         await _restore_quietly(composer, page, snapshot)
@@ -816,7 +1000,8 @@ async def run_agent_video(
     download: bool,
     on_started: VideoStartedCallback | None,
 ) -> VideoResult:
-    """Text-to-video on the agent-only composer. Same return shape as the classic path."""
+    """Text-to-video, image-to-video from a local start (and end) frame, or reference-to-video
+    from local files, on the agent-only composer. Same return shape as the classic path."""
     unported = _unported_video(request)
     if unported is not None:
         raise _refuse(unported)
@@ -835,16 +1020,23 @@ async def run_agent_video(
             return None
         return on_started(VideoStarted(media_id=media_id, project_id=project_id))
 
+    paths, attached_as = _video_images(request)
     try:
+        attached = await composer.attach_images(page, project_id, paths)
         (media,) = await composer.generate(
             page,
             compose_video_directive(
-                request.prompt, request.duration, _VIDEO_ASPECT_LABEL[request.aspect]
+                request.prompt,
+                request.duration,
+                _VIDEO_ASPECT_LABEL[request.aspect],
+                attached=attached_as,
+                images=len(attached),
             ),
             kind="video",
             count=1,
             budget_s=poll_timeout_s,
             on_first_media=started,
+            attached=attached,
         )
     finally:
         await _restore_quietly(composer, page, snapshot)

@@ -171,7 +171,9 @@ The labs `AgenticFlowUiDriver` design carries over; its anchors do not:
   Lite) is honoured — the default read "Omni 1.1 Flash"; not asked for by name.
 - ~~**Duration**~~ — measured afterwards: the e2e and live CLI run downloaded the 4 s request as a 4.01 s 720×1280 MP4.
 - ~~**"Never" confirm setting**~~ — measured in the sixth run below (confirm = Never, no gate). Which radio is which was measured 2026-09-16 by input `value` (Always `1`, Never `2`), `scripts/dev/spike_agent_confirm_radios.py`.
-- **i2v / r2v** (attaching a start frame or references through `Add ingredients`).
+- ~~**i2v / r2v**~~ — the attach path was measured on 2026-10-13
+  ([spike](2026-10-13-agent-only-attach-local-images.md)): chips through the prompt box's own
+  add menu. Live video submit from attached images is still unmeasured.
 - ~~**Count > 1**~~ — measured afterwards by the e2e: `--aspect 3:4 --count 2` returned two 896×1200 images. Count 3–4 was not sent.
 - **Content-policy refusal.** No blocked prompt was sent.
 - **Repeatability.** N=1. Cohort stability for this account over time is unknown.

@@ -1983,10 +1983,20 @@ class MigratedComposer:
         return await self._upload_via_toolbar(page, project_id, image_path)
 
     async def _upload_via_toolbar(
-        self, page: Page, project_id: str, image_path: Path
+        self,
+        page: Page,
+        project_id: str,
+        image_path: Path,
+        *,
+        add_button: str = TOOLBAR_ADD,
+        upload_item: str = UPLOAD_MENU_ITEM,
     ) -> tuple[str, str]:
         """Toolbar ``+`` → the ``upload`` menu item → the file chooser → the app's own
         ``maseQ`` upload, observed for the media id it returns. Nothing is replayed.
+
+        ``add_button`` / ``upload_item`` name a different opener for the same chooser:
+        the agent-only composer (#799) uploads through its prompt box's own add menu, so
+        the upload lands where its "Add to prompt" picker is already open.
 
         Returns ``(media_id, display_name)``. The bytes are handed to the chooser with a
         **run-unique display name** (:func:`_unique_display_name`) rather than the file's
@@ -2027,23 +2037,23 @@ class MigratedComposer:
         page.on("response", on_response)
         page.on("request", on_request)
         try:
-            add = page.locator(TOOLBAR_ADD).first
+            add = page.locator(add_button).first
             if not await add.count():
                 raise UiSelectorDriftError(
                     detail=(
-                        "migrated host: the toolbar add button (mat-icon 'add' outside "
-                        "flow-prompt-box) is missing (host=migrated)"
+                        f"migrated host: the upload opener ({add_button}) is missing "
+                        "(host=migrated)"
                     ),
                 )
             await add.click(timeout=5000)
-            item = page.locator(UPLOAD_MENU_ITEM).first
+            item = page.locator(upload_item).first
             try:
                 await item.wait_for(state="visible", timeout=int(FRAME_PICKER_OPEN_S * 1000))
             except Exception as e:
                 raise UiSelectorDriftError(
                     detail=(
-                        "migrated host: the toolbar menu rendered no upload entry "
-                        f"({MENU_ITEM} with the 'upload' ligature) within "
+                        "migrated host: the add menu rendered no upload entry "
+                        f"({upload_item}) within "
                         f"{FRAME_PICKER_OPEN_S:.0f}s (host=migrated)"
                     ),
                 ) from e

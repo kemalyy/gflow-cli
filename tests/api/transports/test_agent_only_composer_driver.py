@@ -44,6 +44,8 @@ FIXTURE = r"""
 <div id="chat"></div>
 <flow-creative-agent-prompt-box>
   <flow-rich-text-editor><div class="ProseMirror" contenteditable="true"></div></flow-rich-text-editor>
+  <flow-ingredient-bar id="bar"></flow-ingredient-bar>
+  <button class="add-menu-trigger" id="add"><mat-icon>add</mat-icon></button>
   <span id="slot"></span>
   <button class="agent-action-button" id="tune"><mat-icon>tune</mat-icon></button>
 </flow-creative-agent-prompt-box>
@@ -51,7 +53,7 @@ FIXTURE = r"""
 <script>
 const S = Object.assign({kind: 'image', gates: 0, produce: 1, delay: 120, idle: false,
   staleGate: false, preMedia: false, dupe: false, posterOnly: false}, window.SCENARIO || {});
-window.log = {submitted: null, approvals: 0, saves: []};
+window.log = {submitted: null, submits: 0, chipsAtSubmit: null, approvals: 0, saves: []};
 const state = {groups: [0, 1, 0, 0],
   models: {image: '\u{1F34C} Nano Banana 2', video: 'Omni 1.1 Flash'}, confirm: 0};
 const LIGS = [['crop_16_9', 'crop_landscape', 'crop_square', 'crop_portrait', 'crop_9_16'],
@@ -133,7 +135,15 @@ function produce() {
   }, S.delay);
 }
 function submit() {
+  window.log.submits++;
   window.log.submitted = document.querySelector('.ProseMirror').innerText;
+  window.log.chipsAtSubmit = [...document.querySelectorAll('#bar img')].map(i => i.src.split('/image/')[1].split('?')[0]);
+  // Measured 2026-10-13: an upload joins the project grid too. Late, here: after submit.
+  if (S.uploadTiles) window.log.chipsAtSubmit.forEach(u => {
+    const t = document.createElement('flow-image-tile');
+    t.innerHTML = `<img src="https://flow-content.google/image/${u}?Expires=1">`;
+    document.getElementById('grid').prepend(t);
+  });
   // Measured: a re-render swaps an existing tile's cdn media for opaque /asb/ — same clip.
   if (S.rerenderOld) setTimeout(() => {
     const old = document.getElementById('old-video');
@@ -195,6 +205,39 @@ function renderPane() {
   };
 }
 document.getElementById('tune').onclick = renderPane;
+// The prompt box's add menu (measured 2026-10-13): a popover listing assets; an option
+// click SELECTS, "Add to prompt" commits a chip whose thumbnail names the media uuid.
+function popover() {
+  let p = document.querySelector('flow-add-menu-popover-content');
+  if (!p) {
+    p = document.createElement('flow-add-menu-popover-content');
+    p.innerHTML = '<button class="sidebar-upload-btn"><mat-icon>upload</mat-icon></button><div id="opts"></div>' +
+      '<button class="detail-add-to-prompt-btn">Add to prompt</button>';
+    document.body.appendChild(p);
+    p.querySelector('.detail-add-to-prompt-btn').onclick = () => commit(p.dataset.sel);
+    (window.assets || []).forEach(a => addOption(p, a));
+  }
+  return p;
+}
+function commit(uuid) {
+  const p = document.querySelector('flow-add-menu-popover-content');
+  if (p) p.remove();
+  if (!uuid || S.dropChip) return;
+  document.getElementById('bar').insertAdjacentHTML('beforeend',
+    `<flow-ingredient-chip><button class="chip-container"><img class="chip-image" src="https://flow-content.google/image/${uuid}?Expires=1&Signature=s"></button></flow-ingredient-chip>`);
+}
+function addOption(p, a) {
+  const o = document.createElement('button');
+  o.className = 'asset-item'; o.setAttribute('role', 'option'); o.textContent = a.name;
+  o.onclick = () => { p.dataset.sel = a.uuid; if (S.commitOnClick) commit(a.uuid); };
+  p.querySelector('#opts').prepend(o);
+}
+document.getElementById('add').onclick = popover;
+window.uploadDone = (name, uuid) => {
+  window.assets = [...(window.assets || []), {name, uuid}];
+  addOption(popover(), {name, uuid});
+};
+if (S.strayChip) commit('00000000-0000-4000-8000-0000000000ff');
 setSubmit(false);
 if (S.preMedia) tile('image', 1);
 if (S.rerenderOld || S.oldVideo) {
@@ -770,7 +813,9 @@ async def test_a_form_only_the_agent_composer_takes_is_not_refused_up_front(
 @pytest.mark.parametrize(
     "request_",
     [
-        image_api.GenerateImageRequest(prompt="x", ref_paths=(MagicMock(),)),
+        image_api.GenerateImageRequest(
+            prompt="x", refs=(image_api.ImageRef(name="00000000-0000-4000-8000-000000000001"),)
+        ),
         image_api.GenerateImageRequest(prompt="x", reference_entities=("e1",)),
         image_api.GenerateImageRequest(prompt="x", model=image_api.Model.IMAGEN_3_5),
     ],
@@ -786,7 +831,10 @@ async def test_unported_image_forms_are_refused(request_: Any) -> None:
 @pytest.mark.parametrize(
     "changes",
     [
-        {"mode": video_api.Mode.I2V, "start_image": MagicMock()},
+        # A frame by media UUID: no local file to attach.
+        {"mode": video_api.Mode.I2V, "start_image_ref_id": "00000000-0000-4000-8000-000000000001"},
+        {"mode": video_api.Mode.R2V, "reference_images": (MagicMock(),), "ref_names": ("n",)},
+        {"mode": video_api.Mode.R2V, "reference_images": (MagicMock(),), "reference_audio": "v"},
         {"count": 2},
         {"aspect": video_api.Aspect.SQUARE},
         {"reference_entities": ("e1",)},
@@ -840,3 +888,189 @@ async def test_unported_video_forms_are_refused(changes: dict[str, Any]) -> None
 )
 def test_full_size_src_asks_asb_for_the_original_size(src: str, expected: str) -> None:
     assert aoc._full_size_src(src) == expected  # pyright: ignore[reportPrivateUsage]
+
+
+# --- local images: attach through the prompt box's add menu (#799, 2026-10-13) --------------
+
+_UPLOADED = "aaaaaaaa-0000-4000-8000-{:012d}"
+
+
+@pytest.fixture
+def uploads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Stand in for the `maseQ` upload: open the box's menu the driver names, list the file
+    in the popover under a run-unique name, and return the uuid the reply would carry."""
+    from gflow_cli.api import client
+    from gflow_cli.api.transports import migrated_composer as mc
+    from gflow_cli.config import reset_settings
+
+    monkeypatch.setenv("GFLOW_CLI_AGENT_CONFIRM", "account")
+    reset_settings()
+    seen: list[str] = []
+
+    async def valid(_path: Any) -> None:
+        return None
+
+    async def fake_upload(
+        _self: Any, page: Page, _pid: str, path: Any, *, add_button: str, upload_item: str
+    ) -> tuple[str, str]:
+        assert add_button == aoc.BOX_ADD
+        assert upload_item == aoc.POPOVER_UPLOAD
+        await page.locator(add_button).click()
+        uuid = _UPLOADED.format(len(seen) + 1)
+        name = f"{path.stem}-tag{len(seen)}{path.suffix}"
+        await page.evaluate("([n, u]) => window.uploadDone(n, u)", [name, uuid])
+        seen.append(uuid)
+        return uuid, name
+
+    monkeypatch.setattr(client, "validate_image_file", valid)
+    monkeypatch.setattr(mc.MigratedComposer, "_upload_via_toolbar", fake_upload)
+    monkeypatch.setattr(aoc, "COMMIT_GRACE_S", 0.05)
+    monkeypatch.setattr(aoc, "CHIP_S", 0.5)
+    monkeypatch.setattr(aoc, "OPTION_S", 0.5)
+    return seen
+
+
+def test_directives_name_attached_images_by_role() -> None:
+    assert aoc.compose_image_directive("a boat", 1, "9:16", references=1) == (
+        "Make me a picture of a boat in a 9:16 aspect ratio, using the attached image as a "
+        "reference."
+    )
+    assert aoc.compose_image_directive("a boat", 1, "9:16", references=2).endswith(
+        "using the 2 attached images as references."
+    )
+    assert aoc.compose_video_directive(
+        "a boat", 8, "9:16", attached="start_frame", images=1
+    ).endswith("using the attached image as its first frame.")
+    assert "second attached image as its last frame" in aoc.compose_video_directive(
+        "a boat", None, "16:9", attached="start_end_frames", images=2
+    )
+    # No attachment: the text-only directive is unchanged.
+    assert aoc.compose_video_directive("a boat", 4, "9:16", attached=None, images=0) == (
+        aoc.compose_video_directive("a boat", 4, "9:16")
+    )
+
+
+@pytest.mark.asyncio
+async def test_i2i_attaches_each_ref_in_order_and_an_upload_tile_is_never_a_result(
+    page: Page, uploads: list[str], tmp_path: Any
+) -> None:
+    await _load(page, kind="image", uploadTiles=True)
+    refs = (tmp_path / "a.jpg", tmp_path / "b.jpg")
+    images = await aoc.run_agent_images(
+        page, image_api.GenerateImageRequest(prompt="x", ref_paths=refs), project_id="p1"
+    )
+    log = await _log(page)
+    assert log["chipsAtSubmit"] == uploads
+    assert log["submitted"].endswith("using the 2 attached images as references.")
+    assert [i.media_name for i in images] == ["00000000-0000-4000-8000-000000000100"]
+    assert log["submits"] == 1
+    assert len(log["saves"]) == 2  # applied, then restored
+
+
+@pytest.mark.asyncio
+async def test_a_cohort_whose_option_click_commits_still_attaches(
+    page: Page, uploads: list[str], tmp_path: Any
+) -> None:
+    await _load(page, kind="image", commitOnClick=True)
+    await aoc.run_agent_images(
+        page,
+        image_api.GenerateImageRequest(prompt="x", ref_paths=(tmp_path / "a.jpg",)),
+        project_id="p1",
+    )
+    assert (await _log(page))["chipsAtSubmit"] == uploads
+
+
+@pytest.mark.asyncio
+async def test_a_chip_that_never_lands_refuses_before_submit_and_restores(
+    page: Page, uploads: list[str], tmp_path: Any
+) -> None:
+    from gflow_cli.errors import ReferenceNotFoundError
+
+    await _load(page, kind="image", dropChip=True)
+    with pytest.raises(ReferenceNotFoundError, match="nothing was submitted"):
+        await aoc.run_agent_images(
+            page,
+            image_api.GenerateImageRequest(prompt="x", ref_paths=(tmp_path / "a.jpg",)),
+            project_id="p1",
+        )
+    log = await _log(page)
+    assert log["submits"] == 0
+    assert len(uploads) == 1  # the option pick is retried; the upload never is
+    assert len(log["saves"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_chip_already_in_the_box_refuses_before_any_upload(
+    page: Page, uploads: list[str], tmp_path: Any
+) -> None:
+    await _load(page, kind="image", strayChip=True)
+    with pytest.raises(FlowAgentUiError, match="already holds"):
+        await aoc.run_agent_images(
+            page,
+            image_api.GenerateImageRequest(prompt="x", ref_paths=(tmp_path / "a.jpg",)),
+            project_id="p1",
+        )
+    assert uploads == []
+    assert (await _log(page))["submits"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attached", [(), ("00000000-0000-4000-8000-0000000000aa",)])
+async def test_chips_that_differ_from_the_attached_ones_are_never_submitted(
+    page: Page, attached: tuple[str, ...]
+) -> None:
+    """A stray chip on a text-only run, or an attached chip gone by submit time."""
+    from gflow_cli.errors import ReferenceNotFoundError
+
+    await _load(page, kind="image", strayChip=not attached)
+    with pytest.raises(ReferenceNotFoundError):
+        await aoc.AgentOnlyComposer().generate(
+            page, "Make me", kind="image", count=1, budget_s=5, attached=attached
+        )
+    assert (await _log(page))["submits"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changes", "expected_ids", "clause"),
+    [
+        ({"mode": video_api.Mode.I2V}, 1, "using the attached image as its first frame."),
+        ({"mode": video_api.Mode.I2V, "end": True}, 2, "second attached image as its last frame."),
+        ({"mode": video_api.Mode.R2V}, 3, "using the 3 attached images as references."),
+    ],
+)
+async def test_video_from_local_images_attaches_them_and_names_their_role(
+    page: Page,
+    uploads: list[str],
+    tmp_path: Any,
+    changes: dict[str, Any],
+    expected_ids: int,
+    clause: str,
+) -> None:
+    import dataclasses
+
+    start, end = tmp_path / "s.jpg", tmp_path / "e.jpg"
+    fields: dict[str, Any] = {"mode": changes["mode"]}
+    if changes["mode"] is video_api.Mode.I2V:
+        fields["start_image"] = start
+        if changes.get("end"):
+            fields["end_image"] = end
+    else:
+        fields["reference_images"] = (start, end, tmp_path / "c.jpg")
+    request = dataclasses.replace(video_api.GenerateVideoRequest(prompt="x"), **fields)
+    await _load(page, kind="video", uploadTiles=True)
+    result = await aoc.run_agent_video(
+        page,
+        request,
+        project_id="p1",
+        out_dir=None,
+        poll_timeout_s=10,
+        download=False,
+        on_started=None,
+    )
+    log = await _log(page)
+    assert len(uploads) == expected_ids
+    assert log["chipsAtSubmit"] == uploads
+    assert log["submitted"].endswith(clause)
+    assert log["submits"] == 1
+    assert result.status.media_id == "00000000-0000-4000-8000-000000000100"
