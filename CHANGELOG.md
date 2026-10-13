@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`=s0`; the tile itself shows a 512-px preview), videos once no pending tile is left, with the clip id taken from the agent's reply when the grid tile has
   none. Live-verified on an AI Pro account: 3:4 × 2 images, and a 4 s 9:16 clip downloaded.
   Other forms on that composer exit 36 before anything is clicked.
+- **Local images on Flow's agent-only composer
+  ([#799](https://github.com/ffroliva/gflow-cli/issues/799)).** `gflow image i2i --ref <file>`,
+  `gflow video i2v --initial-frame <file> [--end-frame <file>]` and `gflow video r2v --ref <file>`
+  (and their MCP twins) no longer exit 36 there. Each file is uploaded through the prompt box's
+  own add menu and attached as a chip; the chip's thumbnail must name the uploaded media id, and
+  the chip bar must hold exactly the attached images, in order, when gflow submits, or nothing is
+  submitted (exit 32). Chips carry no role, so the request names a start / end frame by attach
+  order ("using the first attached image as its first frame…"). An uploaded image's own grid
+  tile is never returned as a result. Live-verified: one i2i run kept the reference's face.
+  **Video from local images is not live-verified** — attaching and the request text were checked
+  up to submit, and nothing was submitted. A frame or reference given by Flow name or media id,
+  and voice references, still exit 36 there.
 - **`GFLOW_CLI_AGENT_CONFIRM=account|always|never`** — the agent-only composer's "Confirm before
   generating" choice, applied before a run and kept. `account` (default) leaves the account's
   setting alone. With a confirmation step gflow approves exactly one that its own submit
