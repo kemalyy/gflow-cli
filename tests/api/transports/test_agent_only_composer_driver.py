@@ -343,7 +343,8 @@ async def test_a_re_rendered_old_tile_is_not_ready_while_the_new_clip_is_pending
 async def test_a_re_rendered_old_tile_is_not_a_new_clip(page: Page) -> None:
     """Head changed and nothing is pending, but no new uuid exists: nothing was made."""
     await _load(page, kind="video", rerenderOld=True, idle=True)
-    with pytest.raises(TransportTimeoutError):
+    # Either way the old clip is never returned: an empty turn fails fast, else the budget.
+    with pytest.raises((FlowAgentUiError, TransportTimeoutError)):
         await aoc.AgentOnlyComposer().generate(page, "x", kind="video", count=1, budget_s=1.5)
 
 
@@ -404,6 +405,19 @@ async def test_a_turn_that_makes_nothing_fails_fast(page: Page) -> None:
     await _load(page, kind="image", idle=True)
     with pytest.raises(FlowAgentUiError, match="no image") as exc:
         await aoc.AgentOnlyComposer().generate(page, "x", kind="image", count=1, budget_s=30)
+    _assert_not_retried(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_video_turn_that_asks_a_question_fails_fast(page: Page) -> None:
+    # Measured 2026-10-13: asked for a 4 s Veo Fast r2v clip, the agent replied with a
+    # question (Fast only does 8 s with references) and queued nothing; the run then
+    # waited out its whole 600 s budget.
+    reply = "For a 4-second video, would you like me to switch to the Omni 1.1 Flash model?"
+    await _load(page, kind="video", idle=True, reply=reply)
+    with pytest.raises(FlowAgentUiError, match="no video") as exc:
+        await aoc.AgentOnlyComposer().generate(page, "x", kind="video", count=1, budget_s=30)
+    assert "Omni 1.1 Flash" in str(exc.value)
     _assert_not_retried(exc.value)
 
 

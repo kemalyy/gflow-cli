@@ -638,6 +638,16 @@ class AgentOnlyComposer:
             await asyncio.sleep(POLL_S)
         log.info("migrated.agent_only.gate_approved")
 
+    async def _empty_turn(self, page: Page, kind: Section) -> FlowAgentUiError:
+        return FlowAgentUiError(
+            detail=(
+                f"agent-only composer: the agent turn ended with no {kind} and no credit "
+                f"gate. Last reply: {await self._last_reply(page)}"
+            ),
+            retryable=False,
+            remediation_hint=_AFTER_SUBMIT_HINT,
+        )
+
     async def generate(
         self,
         page: Page,
@@ -766,6 +776,14 @@ class AgentOnlyComposer:
                         continue
                     log.info("migrated.agent_only.video_ready", media_id=uuid)
                     return [TileMedia(uuid, src)]
+                # A reply with no gate and no clip queued is a finished turn (e.g. the agent
+                # asked a question), not a slow render: fail now instead of at the budget.
+                if not approvals and not in_flight and not peak_pending and not named:
+                    idle_since = idle_since or time.monotonic()
+                    if time.monotonic() - idle_since >= IDLE_S:
+                        raise await self._empty_turn(page, kind)
+                else:
+                    idle_since = None
                 await asyncio.sleep(POLL_S)
                 continue
             fresh = {u: m for u, m in (await self._media(page)).items() if u not in baseline}
@@ -783,14 +801,7 @@ class AgentOnlyComposer:
             if kind == "image" and not approvals and not in_flight and not fresh:
                 idle_since = idle_since or time.monotonic()
                 if time.monotonic() - idle_since >= IDLE_S:
-                    raise FlowAgentUiError(
-                        detail=(
-                            "agent-only composer: the agent turn ended with no image and no "
-                            f"credit gate. Last reply: {await self._last_reply(page)}"
-                        ),
-                        retryable=False,
-                        remediation_hint=_AFTER_SUBMIT_HINT,
-                    )
+                    raise await self._empty_turn(page, kind)
             else:
                 idle_since = None
             await asyncio.sleep(POLL_S)
