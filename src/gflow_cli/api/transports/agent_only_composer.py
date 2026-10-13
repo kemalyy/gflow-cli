@@ -102,6 +102,9 @@ SUBMIT = "flow-generate-icon-button button"
 IN_FLIGHT = "flow-stop-icon-button"
 #: A gate still waiting for an answer. Answered or abandoned ones keep `.read-only`.
 LIVE_GATE = "flow-permission-message:has(div[role='radio'].option-row:not(.read-only))"
+#: A generation Flow gave up on: the chat option renders this instead of the media, and the
+#: agent's reply can still say the clip is queued (measured 2026-10-13).
+FAILED_CARD = "flow-error-tile"
 #: Approve is the first `check` row; the second `check` is "Always approve".
 APPROVE_ROW = "div[role='radio'].option-row:not(.read-only):has(mat-icon:text-is('check'))"
 LAST_REPLY = "flow-chat-bubble"
@@ -666,6 +669,7 @@ class AgentOnlyComposer:
         a result.
         """
         baseline_gates = await page.locator(LIVE_GATE).count()
+        baseline_failed = await page.locator(FAILED_CARD).count()
         baseline_head: str | None = None
         if kind == "video":
             state0 = await page.evaluate(_VIDEO_JS)
@@ -742,6 +746,17 @@ class AgentOnlyComposer:
                 await self._approve_gate(page, baseline_gates)
                 approvals += 1
                 continue
+            failed = page.locator(FAILED_CARD)
+            if await failed.count() > baseline_failed:
+                reason = " ".join((await failed.last.inner_text()).split())
+                raise FlowAgentUiError(
+                    detail=(
+                        f"agent-only composer: Flow reported the {kind} generation failed "
+                        f"(approvals={approvals}): {reason}"
+                    ),
+                    retryable=False,
+                    remediation_hint=_AFTER_SUBMIT_HINT,
+                )
 
             in_flight = bool(await page.locator(IN_FLIGHT).count())
             if kind == "video":

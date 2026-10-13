@@ -125,6 +125,18 @@ function gate() {
   document.getElementById('chat').appendChild(m);
 }
 function produce() {
+  if (S.fail) {
+    // Measured 2026-10-13: after an approved gate Flow can answer with a failed option
+    // (flow-error-tile) and no clip, while the reply still says the video is queued.
+    setTimeout(() => {
+      document.getElementById('chat').insertAdjacentHTML('beforeend',
+        '<flow-a2ui-video-option><flow-error-tile><div class="error-title">Failed</div>' +
+        '<span class="error-message-text">Something went wrong. Please try again.</span>' +
+        '</flow-error-tile></flow-a2ui-video-option>');
+      setSubmit(false);
+    }, S.delay);
+    return;
+  }
   setSubmit(true);
   setTimeout(() => {
     for (let i = 0; i < S.produce; i++) {
@@ -247,6 +259,8 @@ if (S.rerenderOld || S.oldVideo) {
   document.getElementById('grid').prepend(old);
 }
 if (S.staleGate) gate();
+if (S.oldFail) document.getElementById('chat').insertAdjacentHTML('beforeend',
+  '<flow-error-tile><span class="error-message-text">old failure</span></flow-error-tile>');
 if (S.prePending) {
   const busy = document.createElement('flow-video-tile');
   busy.innerHTML = '<flow-pending-tile><div class="loading-percentage">70%</div></flow-pending-tile>';
@@ -419,6 +433,22 @@ async def test_a_video_turn_that_asks_a_question_fails_fast(page: Page) -> None:
         await aoc.AgentOnlyComposer().generate(page, "x", kind="video", count=1, budget_s=30)
     assert "Omni 1.1 Flash" in str(exc.value)
     _assert_not_retried(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_generation_card_fails_fast(page: Page) -> None:
+    await _load(page, kind="video", gates=1, fail=True)
+    with pytest.raises(FlowAgentUiError, match="Something went wrong") as exc:
+        await aoc.AgentOnlyComposer().generate(page, "x", kind="video", count=1, budget_s=30)
+    assert "failed" in str(exc.value)
+    _assert_not_retried(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_card_from_an_earlier_run_is_not_this_runs_failure(page: Page) -> None:
+    await _load(page, kind="video", oldFail=True)
+    (media,) = await aoc.AgentOnlyComposer().generate(page, "x", kind="video", count=1, budget_s=10)
+    assert media.uuid == "00000000-0000-4000-8000-000000000100"
 
 
 @pytest.mark.asyncio

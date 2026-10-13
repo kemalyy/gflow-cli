@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A generation that Flow marks as failed now stops the run at once.** After an approved credit gate, Flow can answer with a failed option card (`flow-error-tile`, "Something went wrong") and no clip, while the agent's reply still says the video is queued. gflow kept polling until its 600 s budget ran out. It now raises exit 25 with Flow's message as soon as the card appears; a card left from an earlier run does not count.
 - **A video run on the agent-only composer now fails fast when the agent answers instead of generating.** Asked for a 4 s Veo Fast reference video, the agent replied with a question (Fast only makes 8 s clips from references) and queued nothing; gflow waited out its whole 600 s budget. A turn that ends with no credit gate and no clip queued now raises exit 25 with the agent's reply, as image runs already did.
 - **A run that starts on a project's media edit view now returns to the project page.** Chrome restores the last tab, so a run could open on `/project/<id>/edit/<media>`; the prefix check took that for the project page, skipped navigation, and failed with exit 23 ("no 'mode' radio offering 'image'"). The check now requires the project page itself, which also stops `/project/p10` passing for `p1`.
 
