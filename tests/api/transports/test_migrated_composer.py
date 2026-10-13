@@ -1742,6 +1742,24 @@ async def test_ensure_editor_skips_navigation_when_already_there() -> None:
     assert page.gotos == []
 
 
+async def test_ensure_editor_leaves_a_restored_media_edit_view() -> None:
+    # Chrome restores the last tab, so a run can start on the project's media edit view
+    # (/project/<id>/edit/<media>), where the composer is a different prompt box.
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage(url="https://flow.google.com/project/p1/edit/m1")
+    await MigratedComposer().ensure_editor(page, "p1", timeout_s=1.0)
+    assert page.gotos == ["https://flow.google.com/project/p1"]
+
+
+async def test_ensure_editor_does_not_treat_a_longer_project_id_as_this_one() -> None:
+    from gflow_cli.api.transports.migrated_composer import MigratedComposer
+
+    page = FakePage(url="https://flow.google.com/project/p10")
+    await MigratedComposer().ensure_editor(page, "p1", timeout_s=1.0)
+    assert page.gotos == ["https://flow.google.com/project/p1"]
+
+
 async def test_ensure_editor_exits_persisted_agent_mode_before_waiting_for_settings() -> None:
     from gflow_cli.api.transports.migrated_composer import MigratedComposer
 

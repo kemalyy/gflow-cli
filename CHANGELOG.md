@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run that starts on a project's media edit view now returns to the project page.** Chrome restores the last tab, so a run could open on `/project/<id>/edit/<media>`; the prefix check took that for the project page, skipped navigation, and failed with exit 23 ("no 'mode' radio offering 'image'"). The check now requires the project page itself, which also stops `/project/p10` passing for `p1`.
+
 - **`gflow image t2i --project-name` titles a multi-prompt run's project (#975).** With
   several prompts (positional, `--prompts-file` or `--stdin`) the option was accepted and
   then dropped: the shared project was always titled `gflow-cli t2i`. It now gets the name

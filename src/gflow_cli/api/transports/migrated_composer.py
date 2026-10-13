@@ -99,6 +99,19 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 MIGRATED_PROJECT_URL = "https://flow.google.com/project/{project_id}"
+
+
+def _on_project_root(page: Page, target: str) -> bool:
+    """Whether ``page`` already shows the project page itself (``target``).
+
+    A prefix test is not enough: Chrome restores the last tab, so a run can start on the
+    project's media edit view (``/project/<id>/edit/<media>``), whose prompt box is not the
+    composer; and ``/project/p10`` starts with ``/project/p1``.
+    """
+    current = str(getattr(page, "url", "") or "")
+    return current.split("?", 1)[0].split("#", 1)[0].rstrip("/") == target
+
+
 READY_ANCHOR = ".settings-trigger-button"
 OVERLAY = ".cdk-overlay-pane"
 #: Playwright's own visibility engine — the detached overlays Angular leaves behind are
@@ -1133,8 +1146,7 @@ class MigratedComposer:
         needed on either kind of account), wait for the settings trigger, and report
         which composer is there: ``"classic"``, or #799's ``"agent_only"``."""
         target = MIGRATED_PROJECT_URL.format(project_id=project_id)
-        current = str(getattr(page, "url", "") or "")
-        if not current.startswith(target):
+        if not _on_project_root(page, target):
             log.info("migrated.navigate", url=target)
             await page.goto(target, wait_until="domcontentloaded", timeout=45_000)
         await self._dismiss_dialog(page)
@@ -3539,7 +3551,7 @@ async def rename_project(
 ) -> None:
     """Rename a project through its header title on flow.google.com."""
     target = MIGRATED_PROJECT_URL.format(project_id=project_id)
-    if not str(getattr(page, "url", "") or "").startswith(target):
+    if not _on_project_root(page, target):
         await page.goto(target, wait_until="domcontentloaded", timeout=45_000)
     await MigratedComposer._dismiss_dialog(page)  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
     field = await _wait_anchor(
